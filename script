@@ -68,13 +68,6 @@ RunService.Heartbeat:Connect(function()
     end
 end)
 
--- Also detect if game is about to close/kick
-game:BindToClose(function()
-    pcall(function()
-        TeleportService:Teleport(PLACE_ID)
-    end)
-end)
-
 -- ============================================================
 -- PET DATA MODULE (has .Rarity for each pet species)
 -- ============================================================
@@ -442,7 +435,7 @@ local function hopServer()
             if s.id and s.id ~= currentId and s.playing and s.maxPlayers then
                 local emptySlots = s.maxPlayers - s.playing
                 if emptySlots >= MIN_EMPTY_SLOTS then
-                    table.insert(candidates, { id = s.id, empty = emptySlots })
+                    table.insert(candidates, { id = s.id, empty = emptySlots, playing = s.playing })
                 end
             end
         end
@@ -461,21 +454,18 @@ local function hopServer()
         end
 
         if target then
-            local ok = pcall(function()
+            pcall(function()
                 TeleportService:TeleportToPlaceInstance(PLACE_ID, target, LocalPlayer)
             end)
-            if not ok then
-                pcall(function()
-                    TeleportService:Teleport(PLACE_ID)
-                end)
-            end
             return
         end
     end
 
-    -- Fallback
+    -- Fallback: TeleportAsync
     pcall(function()
-        TeleportService:Teleport(PLACE_ID)
+        local opts = Instance.new("TeleportOptions")
+        opts.ShouldReserveServer = false
+        TeleportService:TeleportAsync(PLACE_ID, {LocalPlayer}, opts)
     end)
 end
 
@@ -560,31 +550,26 @@ local function mainLoop()
         end
         task.wait(1)
  
-    -- Hop immediately after scan
-    local attempts = 0
+    -- Hop immediately after scan, keep retrying until actually on a new server
+    print("[GAG2] Hopping...")
     local hopped = false
-    repeat
-        attempts = attempts + 1
-        print("[GAG2] Hop attempt #" .. attempts .. "/4...")
+    local hopAttempts = 0
+    while not hopped do
+        hopAttempts = hopAttempts + 1
+        print("[GAG2] Hop attempt #" .. hopAttempts)
         hopServer()
-        -- Wait up to 5s for teleport to initiate
         local elapsed = 0
         repeat
             task.wait(0.5)
             elapsed = elapsed + 0.5
-        until game.JobId ~= serverId or elapsed >= 5
+        until game.JobId ~= serverId or elapsed >= 8
         if game.JobId ~= serverId then
             print("[GAG2] ✓ Hopped to: " .. game.JobId)
             hopped = true
-            break
+        else
+            print("[GAG2] Still on same server, retrying...")
+            task.wait(2)
         end
-    until attempts >= 4
-    if not hopped then
-        print("[GAG2] Hard teleport fallback...")
-        pcall(function()
-            TeleportService:Teleport(PLACE_ID)
-        end)
-        task.wait(8)
     end
     waitForMap()
     end
