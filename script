@@ -461,20 +461,16 @@ local function hopServer()
         end
 
         if target then
-            -- Try all teleport methods
-            local teleported = false
-            pcall(function()
+            local ok = pcall(function()
                 TeleportService:TeleportToPlaceInstance(PLACE_ID, target, LocalPlayer)
-                teleported = true
             end)
-            if not teleported then
+            if not ok then
                 pcall(function()
                     TeleportService:Teleport(PLACE_ID)
                 end)
             end
             return
         end
-    end
 
     -- Fallback
     pcall(function()
