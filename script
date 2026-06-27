@@ -1,0 +1,620 @@
+-- GAG2 Pet Scanner + Serverhopper
+-- Scans all pets, sends ONE styled message per server, hops to a DIFFERENT server
+-- ============================================================
+-- CONFIG — only edit this section
+-- ============================================================
+local WEBHOOK_URL  = "https://discord.com/api/webhooks/1518823470379569223/6VMLt9neN9WM32qPzGUP2SBc_gKExSE0BuzMOq1ng2M0FkHeFhSFPPcChnvb0t6nWGkY"
+local WEBHOOK_URL_RARE = "https://discord.com/api/webhooks/1519224551911981106/vC1rAL0dDS_SAdwJBvmrChXT26K83B-j5RTsbuNprKSDE_SsNbpsW5dE6Sw7z0sJXvEl" -- Separate channel for Mythic+
+local PING_ROLE_ID = "1519071955712475306" -- Role to ping on Mythic/Super spawns (right click role > Copy Role ID)
+local MIN_EMPTY_SLOTS = 2  -- skip servers with fewer than this many empty slots (1-8)
+local PLACE_ID     = game.PlaceId
+
+-- Extract webhook paths for proxies
+local WEBHOOK_PATH = WEBHOOK_URL:match("/api/webhooks/.+") or WEBHOOK_URL
+local WEBHOOK_URLS = {
+    "https://hooks.hyra.io"                  .. WEBHOOK_PATH,
+    "https://webhook.lewistehminerz.dev"     .. WEBHOOK_PATH,
+    "https://discord.com"                    .. WEBHOOK_PATH,
+}
+
+-- Rare webhook URLs (Mythic+ pets)
+local WEBHOOK_PATH_RARE = WEBHOOK_URL_RARE:match("/api/webhooks/.+") or WEBHOOK_URL_RARE
+local WEBHOOK_URLS_RARE = {
+    "https://hooks.hyra.io"                  .. WEBHOOK_PATH_RARE,
+    "https://webhook.lewistehminerz.dev"     .. WEBHOOK_PATH_RARE,
+    "https://discord.com"                    .. WEBHOOK_PATH_RARE,
+}
+
+-- ============================================================
+-- SERVICES
+-- ============================================================
+local TeleportService    = game:GetService("TeleportService")
+local HttpService        = game:GetService("HttpService")
+local Players            = game:GetService("Players")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local LocalPlayer        = Players.LocalPlayer
+
+-- ============================================================
+-- AUTO-REJOIN ON DISCONNECT
+-- ============================================================
+LocalPlayer.OnTeleport:Connect(function(state)
+    if state == Enum.TeleportState.Failed then
+        print("[GAG2] Teleport failed, retrying...")
+        task.wait(3)
+        pcall(function()
+            TeleportService:Teleport(PLACE_ID)
+        end)
+    end
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+    if player == LocalPlayer then
+        print("[GAG2] Disconnected! Attempting rejoin...")
+        task.wait(3)
+        pcall(function()
+            TeleportService:Teleport(PLACE_ID)
+        end)
+    end
+end)
+
+-- Heartbeat kick detector
+local RunService = game:GetService("RunService")
+RunService.Heartbeat:Connect(function()
+    if not Players.LocalPlayer then
+        task.wait(3)
+        pcall(function()
+            TeleportService:Teleport(PLACE_ID)
+        end)
+    end
+end)
+
+-- Also detect if game is about to close/kick
+game:BindToClose(function()
+    pcall(function()
+        TeleportService:Teleport(PLACE_ID)
+    end)
+end)
+
+-- ============================================================
+-- PET DATA MODULE (has .Rarity for each pet species)
+-- ============================================================
+local PetData = nil
+pcall(function()
+    PetData = require(ReplicatedStorage:WaitForChild("SharedData"):WaitForChild("PetData"))
+end)
+
+local RARITY_EMOJI = {
+    Common   = "⚪",
+    Uncommon = "🟢",
+    Rare     = "🔵",
+    Epic     = "🟣",
+    Legendary= "🟡",
+    Mythic   = "🔴",
+    Super    = "🌈",
+    Secret   = "⬛",
+}
+
+local RARITY_ORDER = {
+    Secret = 1, Super = 2, Mythic = 3, Legendary = 4,
+    Epic = 5, Rare = 6, Uncommon = 7, Common = 8
+}
+
+local function getRarity(petName)
+    if not PetData then return "Common" end
+    local ok, data = pcall(function() return PetData[petName] end)
+    if ok and type(data) == "table" and data.Rarity then
+        return tostring(data.Rarity)
+    end
+    return "Common"
+end
+
+local function abbreviateNumber(n)
+    if type(n) ~= "number" then return "?" end
+    if n >= 1e12 then return string.format("%.1fT", n / 1e12) end
+    if n >= 1e9  then return string.format("%.1fB", n / 1e9)  end
+    if n >= 1e6  then return string.format("%.1fM", n / 1e6)  end
+    if n >= 1e3  then return string.format("%.1fK", n / 1e3)  end
+    return tostring(math.floor(n))
+end
+
+local PET_PRICES = {
+    ["Frog"]             = 10000,
+    ["Bunny"]            = 20000,
+    ["Owl"]              = 25000,
+    ["Deer"]             = 50000,
+    ["Turtle"]           = 70000,
+    ["Robin"]            = 75000,
+    ["Bee"]              = 1000000,
+    ["Monkey"]           = 3000000,
+    ["Bear"]             = 5000000,
+    ["Golden Dragonfly"] = 9000000,
+    ["Unicorn"]          = 12000000,
+    ["Raccoon"]          = 15000000,
+    ["Black Dragon"]     = false,  -- Guild Rewards, no price
+    ["Ice Serpent"]      = false,  -- Guild Rewards, no price
+}
+
+local function getPetPrice(petName)
+    local staticPrice = PET_PRICES[petName]
+    if staticPrice then
+        return abbreviateNumber(staticPrice) .. " 🪙"
+    end
+    if staticPrice == false then
+        return nil  -- Known no-price pet (Guild Rewards etc.)
+    end
+    -- Unknown pet, fall back to PetData module
+    if not PetData then return nil end
+    local ok, price = pcall(function() return PetData.GetBasePrice(petName) end)
+    if ok and type(price) == "number" and price > 0 then
+        return abbreviateNumber(price) .. " 🪙"
+    end
+    local data = PetData[petName]
+    if type(data) == "table" and type(data.BasePrice) == "number" and data.BasePrice > 0 then
+        return abbreviateNumber(data.BasePrice) .. " 🪙"
+    end
+    return nil
+end
+
+-- ============================================================
+-- HTTP RESOLVER
+-- ============================================================
+local function getHttpFunc()
+    if typeof(syn) == "table" and typeof(syn.request) == "function" then return syn.request end
+    if typeof(http) == "table" and typeof(http.request) == "function" then return http.request end
+    if typeof(http_request) == "function" then return http_request end
+    if typeof(request) == "function" then return request end
+    if typeof(HttpRequest) == "function" then return HttpRequest end
+    return nil
+end
+
+-- ============================================================
+-- VARIANT DETECTION
+-- ============================================================
+local function getVariant(petModel)
+    -- PetType attribute = "Rainbow" if rainbow
+    local petType = tostring(petModel:GetAttribute("PetType") or "")
+    if petType == "Rainbow" then return "RAINBOW" end
+
+    -- PetSize attribute = "Big" or "Huge"
+    local petSize = tostring(petModel:GetAttribute("PetSize") or "")
+    if petSize == "Huge" then return "HUGE" end
+    if petSize == "Big"  then return "BIG"  end
+
+    return "Normal"
+end
+
+-- Strips UUIDs, "WildPet", size words, underscores — leaves just the species name
+local UUID_PATTERN = "%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x"
+local function getPetName(petModel)
+    -- Prefer a clean species attribute
+    local attr = petModel:GetAttribute("PetSpecies")
+        or petModel:GetAttribute("PetType")
+        or petModel:GetAttribute("Species")
+        or petModel:GetAttribute("Pet")
+    if attr then
+        local s = tostring(attr):gsub(UUID_PATTERN, ""):gsub("_", " "):match("^%s*(.-)%s*$")
+        if s ~= "" then return s end
+    end
+
+    -- Fall back to model name, stripping noise
+    local n = petModel.Name
+    n = n:gsub(UUID_PATTERN, "")   -- remove UUIDs
+    n = n:gsub("WildPet", "")
+    n = n:gsub("Rainbow", ""):gsub("Huge", ""):gsub("Big", "")
+    n = n:gsub("_", " "):gsub("%s+", " "):match("^%s*(.-)%s*$")
+    return (n ~= "") and n or "Unknown"
+end
+
+-- ============================================================
+-- VARIANT EMOJI + COLOR HELPERS
+-- ============================================================
+local function variantEmoji(v)
+    if v == "RAINBOW" then return "🌈" end
+    if v == "HUGE"    then return "🔶" end
+    if v == "BIG"     then return "🔷" end
+    return "▪️"
+end
+
+local function variantLabel(v)
+    if v == "RAINBOW" then return "**🌈 RAINBOW**" end
+    if v == "HUGE"    then return "**🔶 HUGE**"    end
+    if v == "BIG"     then return "**🔷 BIG**"     end
+    return "Normal"
+end
+
+local function bestColor(petList)
+    local color = 0x888888
+    for _, p in ipairs(petList) do
+        if p.variant == "RAINBOW" then return 0xFF00FF end
+        if p.variant == "HUGE"    then color = 0xFF8C00 end
+        if p.variant == "BIG" and color ~= 0xFF8C00 then color = 0x3498DB end
+    end
+    return color
+end
+
+-- ============================================================
+-- SCAN ALL PETS
+-- ============================================================
+local function scanAllPets()
+    local mapFolder = workspace:FindFirstChild("Map")
+    if not mapFolder then warn("[GAG2] workspace.Map not found!") return {} end
+
+    local petList = {}
+
+    local container = mapFolder:FindFirstChild("WildPetSpawns")
+    if not container then
+        warn("[GAG2] WildPetSpawns not found!")
+        return {}
+    end
+
+    for _, petModel in ipairs(container:GetChildren()) do
+        local name    = getPetName(petModel)
+        local variant = getVariant(petModel)
+        local rarity  = getRarity(name)
+        local price   = getPetPrice(name)
+        table.insert(petList, { name = name, variant = variant, rarity = rarity, price = price })
+    end
+
+    -- Sort: rarest first
+    local order = { RAINBOW = 1, HUGE = 2, BIG = 3, Normal = 4 }
+    table.sort(petList, function(a, b)
+        return (order[a.variant] or 4) < (order[b.variant] or 4)
+    end)
+
+    print("[GAG2] Scanned " .. #petList .. " pets from WildPetSpawns")
+    return petList
+end
+-- ============================================================
+-- BUILD + SEND WEBHOOK (one message, all pets)
+-- ============================================================
+local function sendSummaryWebhook(petList, serverId, playerCount, maxPlayers, isRare)
+    local httpFunc = getHttpFunc()
+    if not httpFunc then warn("[GAG2] No HTTP function found!") return end
+
+
+    -- Count variants
+    local counts = { RAINBOW = 0, HUGE = 0, BIG = 0, Normal = 0 }
+    for _, p in ipairs(petList) do counts[p.variant] = (counts[p.variant] or 0) + 1 end
+
+    -- Header line
+    local rareParts = {}
+    if counts.RAINBOW > 0 then table.insert(rareParts, counts.RAINBOW .. "x 🌈 Rainbow") end
+    if counts.HUGE    > 0 then table.insert(rareParts, counts.HUGE    .. "x 🔶 Huge")    end
+    if counts.BIG     > 0 then table.insert(rareParts, counts.BIG     .. "x 🔷 Big")     end
+
+    -- Also flag legendary+ rarities even if normal variant
+    local HIGHLIGHT_RARITIES = { Legendary=true, Mythic=true, Super=true, Secret=true }
+    local hasRarePet = false
+    for _, p in ipairs(petList) do
+        if HIGHLIGHT_RARITIES[p.rarity] then hasRarePet = true break end
+    end
+
+    local hasRare = #rareParts > 0 or hasRarePet
+    local title   = hasRare
+        and "🚨  RARE PETS  |  " .. (#rareParts > 0 and table.concat(rareParts, "  ·  ") or "Legendary+")
+        or  "📋  " .. #petList .. " Pets This Server"
+
+    -- Pet list lines
+    local lines = {}
+    for _, p in ipairs(petList) do
+        local rarityEmoji = RARITY_EMOJI[p.rarity] or "⚪"
+        local priceStr = p.price and ("  ·  " .. p.price) or ""
+        local line = variantEmoji(p.variant) .. " " .. rarityEmoji .. "  **" .. p.name .. "**"
+            .. "  |  " .. p.rarity
+            .. "  ·  " .. variantLabel(p.variant)
+            .. priceStr
+        table.insert(lines, line)
+    end
+    local petBlock = #lines > 0 and table.concat(lines, "\n") or "_No pets found_"
+
+    local embed = {{
+        title       = title,
+        color       = bestColor(petList),
+        description = petBlock,
+        fields = {
+            {
+                name   = "🖥️  Server ID",
+                value  = "`" .. serverId .. "`",
+                inline = true
+            },
+            {
+                name   = "👥  Players",
+                value  = playerCount and maxPlayers
+                    and ("**" .. playerCount .. "** / " .. maxPlayers)
+                    or  "Unknown",
+                inline = true
+            },
+            {
+                name   = "🔗  Join Server",
+                value  = "https://www.roblox.com/games/start?placeId=" .. PLACE_ID .. "&gameInstanceId=" .. serverId,
+                inline = false
+            },
+
+        },
+        footer = { text = "GAG2 Scanner  •  " .. #petList .. " pets  •  " .. os.date("%I:%M:%S %p") }
+    }}
+
+    -- Ping role if any pet is Mythic or Super rarity
+    local PING_RARITIES = { Mythic = true, Super = true }
+    local PING_VARIANTS = { BIG = true, HUGE = true, RAINBOW = true }
+    local shouldPing = false
+    for _, p in ipairs(petList) do
+        if PING_RARITIES[p.rarity] or PING_VARIANTS[p.variant] then
+            shouldPing = true
+            break
+        end
+    end
+
+    local payload = HttpService:JSONEncode({
+        content = shouldPing and ("<@&" .. PING_ROLE_ID .. "> 🚨 Rare pet spotted!") or nil,
+        embeds  = embed
+    })
+
+    -- Try discord.com directly first, then proxies as fallback
+    local urls = isRare and WEBHOOK_URLS_RARE or WEBHOOK_URLS
+    local primaryUrl = isRare and ("https://discord.com" .. WEBHOOK_PATH_RARE) or ("https://discord.com" .. WEBHOOK_PATH)
+    local orderedUrls = { primaryUrl }
+    for _, url in ipairs(urls) do
+        if not url:find("discord.com") then
+            table.insert(orderedUrls, url)
+        end
+    end
+
+    for _, url in ipairs(orderedUrls) do
+        local res, ok, err
+        ok, err = pcall(function()
+            res = httpFunc({ Url = url, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = payload })
+        end)
+        local status = tostring(res and (res.StatusCode or res.status) or "err")
+        print("[GAG2] " .. url:match("//([^/]+)") .. " → HTTP " .. status)
+        if ok and (status == "200" or status == "204") then
+            print("[GAG2] ✓ Webhook delivered!")
+            return
+        end
+    end
+    warn("[GAG2] All webhook attempts failed.")
+end
+
+-- ============================================================
+-- SERVERHOPPER — fetches actual server list, picks different one
+-- ============================================================
+local function getServerList()
+    local httpFunc = getHttpFunc()
+    if not httpFunc then return nil end
+
+    local url = "https://games.roblox.com/v1/games/" .. PLACE_ID .. "/servers/Public?sortOrder=Asc&limit=100"
+    local ok, res = pcall(httpFunc, { Url = url, Method = "GET" })
+    if not ok or not res then return nil end
+
+    local body = res.Body or res.body or ""
+    local ok2, data = pcall(function() return HttpService:JSONDecode(body) end)
+    if not ok2 or not data or not data.data then return nil end
+
+    -- Return full objects: each has .id, .playing, .maxPlayers
+    return data.data
+end
+
+-- Get info (playing, maxPlayers) for the current server specifically
+-- Paginates through all servers to find the current JobId
+local function getCurrentServerInfo()
+    local httpFunc = getHttpFunc()
+    if not httpFunc then return nil, nil end
+
+    local currentId = game.JobId
+    local cursor = ""
+
+    for page = 1, 5 do -- check up to 5 pages (500 servers)
+        local url = "https://games.roblox.com/v1/games/" .. PLACE_ID
+            .. "/servers/Public?sortOrder=Asc&limit=100"
+            .. (cursor ~= "" and ("&cursor=" .. cursor) or "")
+
+        local ok, res = pcall(httpFunc, { Url = url, Method = "GET" })
+        if not ok or not res then break end
+
+        local body = res.Body or res.body or ""
+        local ok2, data = pcall(function() return HttpService:JSONDecode(body) end)
+        if not ok2 or not data or not data.data then break end
+
+        for _, s in ipairs(data.data) do
+            if s.id == currentId then
+                return s.playing, s.maxPlayers
+            end
+        end
+
+        -- Next page
+        if data.nextPageCursor and data.nextPageCursor ~= "" then
+            cursor = data.nextPageCursor
+        else
+            break
+        end
+    end
+
+    return nil, nil
+end
+
+local function hopServer()
+    local currentId = game.JobId
+    local servers   = getServerList()
+
+    if servers and #servers > 0 then
+        -- Priority 1: Server with most empty slots (respecting MIN_EMPTY_SLOTS threshold)
+        local candidates = {}
+        for _, s in ipairs(servers) do
+            if s.id and s.id ~= currentId and s.playing and s.maxPlayers then
+                local emptySlots = s.maxPlayers - s.playing
+                if emptySlots >= MIN_EMPTY_SLOTS then
+                    table.insert(candidates, { id = s.id, empty = emptySlots, playing = s.playing })
+                end
+            end
+        end
+
+        local target = nil
+        if #candidates > 0 then
+            table.sort(candidates, function(a, b) return a.empty > b.empty end)
+            target = candidates[1].id
+        else
+            -- Priority 2: Any different server with at least 1 slot
+            for _, s in ipairs(servers) do
+                if s.id and s.id ~= currentId and s.playing and s.maxPlayers and (s.maxPlayers - s.playing) > 0 then
+                    target = s.id
+                    break
+                end
+            end
+        end
+
+        if target then
+            pcall(function()
+                TeleportService:TeleportToPlaceInstance(PLACE_ID, target, LocalPlayer)
+            end)
+            return
+        end
+    end
+
+    -- Fallback: TeleportAsync (no target needed, Roblox picks a random server)
+    pcall(function()
+        local opts = Instance.new("TeleportOptions")
+        opts.ShouldReserveServer = false
+        TeleportService:TeleportAsync(PLACE_ID, {LocalPlayer}, opts)
+    end)
+end
+
+-- ============================================================
+-- STATS TRACKING
+-- ============================================================
+local stats = {
+    serversVisited = 0,
+    petsFound = 0,
+    startTime = os.time(),
+    lastError = nil,
+}
+
+local function printStats()
+    local uptime = os.time() - stats.startTime
+    local hours = math.floor(uptime / 3600)
+    local mins = math.floor((uptime % 3600) / 60)
+    print("[GAG2] ✓ STATS: " .. stats.serversVisited .. " servers  •  " .. stats.petsFound .. " pets  •  " .. hours .. "h " .. mins .. "m uptime")
+end
+
+-- ============================================================
+-- MAIN LOOP WITH AUTO-RESTART
+-- ============================================================
+local function waitForMap()
+    print("[GAG2] Waiting for pets to load...")
+    repeat
+        task.wait(0.5)
+        local map = workspace:FindFirstChild("Map")
+        if map then
+            local spawns = map:FindFirstChild("WildPetSpawns")
+            if spawns and #spawns:GetChildren() >= 1 then
+                print("[GAG2] " .. #spawns:GetChildren() .. " pets found!")
+                return
+            end
+        end
+    until false
+end
+
+local function mainLoop()
+    print("[GAG2 Scanner] Started | Server: " .. game.JobId)
+    print("[GAG2 Scanner] HTTP func: " .. tostring(getHttpFunc()))
+    print("[GAG2 Scanner] Min empty slots: " .. MIN_EMPTY_SLOTS)
+    waitForMap()
+
+    while true do
+        local serverId = game.JobId
+        stats.serversVisited = stats.serversVisited + 1
+        print("[GAG2] Scanning " .. serverId .. "... (Server #" .. stats.serversVisited .. ")")
+
+        -- Keep scanning until we actually get pets
+        local petList = {}
+        while #petList == 0 do
+            petList = scanAllPets()
+            if #petList == 0 then
+                print("[GAG2] Scan returned 0 pets, retrying in 1s...")
+                task.wait(1)
+            end
+        end
+
+        stats.petsFound = stats.petsFound + #petList
+        print("[GAG2] Found " .. #petList .. " pets (total: " .. stats.petsFound .. ")")
+        local playerCount = #Players:GetPlayers()
+        local maxPlayers  = 8
+        print("[GAG2] Server population: " .. playerCount .. "/" .. maxPlayers)
+ 
+        -- Check if any pets are Mythic/Super/Secret OR Big/Huge/Rainbow variant
+        local RARE_RARITIES = { Mythic = true, Super = true, Secret = true }
+        local RARE_VARIANTS = { BIG = true, HUGE = true, RAINBOW = true }
+        local hasRarePet = false
+        for _, p in ipairs(petList) do
+            if RARE_RARITIES[p.rarity] or RARE_VARIANTS[p.variant] then
+                hasRarePet = true
+                break
+            end
+        end
+
+        -- Always send webhook, waitForMap guarantees pets exist
+        print("[GAG2] Sending webhook...")
+        local ok, err = pcall(sendSummaryWebhook, petList, serverId, playerCount, maxPlayers, hasRarePet)
+        if not ok then
+            warn("[GAG2] Webhook error: " .. tostring(err))
+        end
+        task.wait(1)
+ 
+    -- Hop immediately after scan
+    local attempts = 0
+    local hopped = false
+    repeat
+        attempts = attempts + 1
+        print("[GAG2] Hop attempt #" .. attempts .. "/4...")
+        hopServer()
+        -- Wait up to 5s for teleport to initiate
+        local elapsed = 0
+        repeat
+            task.wait(0.5)
+            elapsed = elapsed + 0.5
+        until game.JobId ~= serverId or elapsed >= 5
+        if game.JobId ~= serverId then
+            print("[GAG2] ✓ Hopped to: " .. game.JobId)
+            hopped = true
+            break
+        end
+    until attempts >= 4
+    if not hopped then
+        print("[GAG2] Hard teleport fallback...")
+        pcall(function()
+            TeleportService:Teleport(PLACE_ID)
+        end)
+        task.wait(8)
+    end
+    waitForMap()
+    end
+end
+
+-- Kick/disconnect safety net at the top level
+local function safeRejoin()
+    task.wait(3)
+    print("[GAG2] Attempting rejoin after disconnect...")
+    pcall(function()
+        TeleportService:Teleport(PLACE_ID)
+    end)
+end
+
+pcall(function()
+    game:GetService("CoreGui").RobloxGui.ChildAdded:Connect(function(child)
+        if child.Name == "DisconnectedOverlay" then
+            print("[GAG2] Disconnect screen detected! Rejoining...")
+            safeRejoin()
+        end
+    end)
+end)
+
+while true do
+    local ok, err = pcall(mainLoop)
+    if not ok then
+        stats.lastError = tostring(err)
+        print("[GAG2] ⚠️ ERROR: " .. stats.lastError)
+        printStats()
+        print("[GAG2] Restarting in 5s...")
+        task.wait(5)
+        print("[GAG2] Restarting...")
+    end
+end
