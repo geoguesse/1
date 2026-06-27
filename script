@@ -57,15 +57,30 @@ Players.PlayerRemoving:Connect(function(player)
     end
 end)
 
--- Heartbeat kick detector
-local RunService = game:GetService("RunService")
-RunService.Heartbeat:Connect(function()
-    if not Players.LocalPlayer then
-        task.wait(3)
+-- Character removal kick detector
+local function onCharacterRemoving()
+    task.wait(3)
+    if not LocalPlayer.Character then
         pcall(function()
             TeleportService:Teleport(PLACE_ID)
         end)
     end
+end
+
+if LocalPlayer.Character then
+    LocalPlayer.Character.AncestryChanged:Connect(function(_, parent)
+        if not parent then
+            onCharacterRemoving()
+        end
+    end)
+end
+
+LocalPlayer.CharacterAdded:Connect(function(char)
+    char.AncestryChanged:Connect(function(_, parent)
+        if not parent then
+            onCharacterRemoving()
+        end
+    end)
 end)
 
 -- ============================================================
