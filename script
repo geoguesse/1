@@ -437,13 +437,12 @@ local function hopServer()
     local servers   = getServerList()
 
     if servers and #servers > 0 then
-        -- Priority 1: Server with most empty slots (respecting MIN_EMPTY_SLOTS threshold)
         local candidates = {}
         for _, s in ipairs(servers) do
             if s.id and s.id ~= currentId and s.playing and s.maxPlayers then
                 local emptySlots = s.maxPlayers - s.playing
                 if emptySlots >= MIN_EMPTY_SLOTS then
-                    table.insert(candidates, { id = s.id, empty = emptySlots, playing = s.playing })
+                    table.insert(candidates, { id = s.id, empty = emptySlots })
                 end
             end
         end
@@ -453,7 +452,6 @@ local function hopServer()
             table.sort(candidates, function(a, b) return a.empty > b.empty end)
             target = candidates[1].id
         else
-            -- Priority 2: Any different server with at least 1 slot
             for _, s in ipairs(servers) do
                 if s.id and s.id ~= currentId and s.playing and s.maxPlayers and (s.maxPlayers - s.playing) > 0 then
                     target = s.id
@@ -463,18 +461,24 @@ local function hopServer()
         end
 
         if target then
+            -- Try all teleport methods
+            local teleported = false
             pcall(function()
                 TeleportService:TeleportToPlaceInstance(PLACE_ID, target, LocalPlayer)
+                teleported = true
             end)
+            if not teleported then
+                pcall(function()
+                    TeleportService:Teleport(PLACE_ID)
+                end)
+            end
             return
         end
     end
 
-    -- Fallback: TeleportAsync (no target needed, Roblox picks a random server)
+    -- Fallback
     pcall(function()
-        local opts = Instance.new("TeleportOptions")
-        opts.ShouldReserveServer = false
-        TeleportService:TeleportAsync(PLACE_ID, {LocalPlayer}, opts)
+        TeleportService:Teleport(PLACE_ID)
     end)
 end
 
