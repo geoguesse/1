@@ -471,6 +471,7 @@ local function hopServer()
             end
             return
         end
+    end
 
     -- Fallback
     pcall(function()
